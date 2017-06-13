@@ -20,28 +20,38 @@ options = {
   token: ENV['GITHUB_TOKEN'],
   org: ENV['GITHUB_ORG'],
   user: ENV['GITHUB_USER'],
-  repo: ENV['GITHUB_REPO']
+  repo: ENV['GITHUB_REPO'],
+  delete_cards: false
 }
 optparse = OptionParser.new do |opts|
   opts.banner = "Usage: #{File.basename $PROGRAM_NAME} [options] list"
 
-  opts.on("-c", "--client-id id", "Wunderlist CLIENT_ID") do |id|
+  opts.on("-w", "--wl-client-id id", "Wunderlist CLIENT_ID") do |id|
     options[:client_id] = id
   end
-  opts.on("-s", "--client_secret secret", "Wunderlist CLIENT_SECRET") do |secret|
+  opts.on("-s", "--wl-client_secret secret", "Wunderlist CLIENT_SECRET") do |secret|
     options[:client_secret] = secret
   end
-  opts.on("-t", "--token token", "Github OAUTH_TOKEN") do |token|
+  opts.on("-t", "--gh-token token", "Github OAUTH_TOKEN") do |token|
     options[:github_token] = token
   end
-  opts.on("-o", "--org org", "Github organisation") do |org|
+  opts.on("-o", "--gh-org org", "Github organisation") do |org|
     options[:org] = org
   end
-  opts.on("-u", "--user user", "Github user") do |user|
+  opts.on("-u", "--gh-user user", "Github user") do |user|
     options[:user] = user
   end
-  opts.on("-r", "--repo repo", "Github repo") do |repo|
+  opts.on("-r", "--gh-repo repo", "Github repo") do |repo|
     options[:repo] = repo
+  end
+  opts.on("-d", "--gh-delete-cards", "Delete old cards in column") do
+    options[:delete_cards] = true
+  end
+  opts.on("-p", "--gh-project name", "Github project name") do |name|
+    options[:github_project] = name
+  end
+  opts.on("-c", "--gh-column name", "Github column name") do |name|
+    options[:github_column] = name
   end
   opts.on_tail("-h", "--help", "Show this message") do
     puts opts
@@ -55,6 +65,7 @@ options[:list] = ARGV.pop
 
 begin
   raise "Set list name" unless options[:list]
+  raise "Set Github project name" unless options[:github_project]
   raise "Set Wunderlist client id" unless options[:client_id]
   raise "Set Wunderlist client secret" unless options[:client_secret]
   raise "Set Github token" unless options[:token]
@@ -64,6 +75,7 @@ rescue => e
   puts optparse
   exit 1
 end
+options[:github_project] ||= options[:list]
 
 wl = Wunderlist::API.new(access_token: options[:client_secret], client_id: options[:client_id])
 
@@ -100,20 +112,26 @@ end
 
 gh = GitHub.new(options)
 
-projects = gh.call(:get)
 puts "Syncing Wunderlist list: #{options[:list]}"
 wl_list = wl.list(options[:list])
-raise "Could not find list: #{options[:list]}" unless wl_list
-until project ||= projects.find { |p| p[:name] == wl_list.title }
-  puts "Creating Github Project: #{options[:list]}"
-  project = gh.call(:post, body: { name: wl_list.title }.to_json)
-  projects << project
+raise "Could not find list: #{options[:list]}" unless wl_list&.title
+project = gh.call(:get).find { |p| p[:name] == options[:github_project] }
+unless project
+  puts "Creating Github Project: #{options[:github_project]}"
+  project = gh.call(:post, body: { name: options[:github_project] }.to_json)
 end
-col = gh.call(:get, path: "projects/#{project[:id]}/columns").first
+col = gh.call(:get, path: "projects/#{project[:id]}/columns")
+  .find { |c| options[:github_column].nil? || c[:name] == options[:github_column] }
+unless col
+  col = gh.call(:post, path: "projects/#{project[:id]}/columns",
+                       body: { name: options[:github_column] || 'Backlog' })
+end
 cards = gh.call(:get, path: "projects/columns/#{col[:id]}/cards")
-puts "Clear #{cards.size} old cards"
-cards.each do |c|
-  gh.call(:delete, path: "projects/columns/cards/#{c[:id]}")
+if options[:delete_cards]
+  puts "Clear #{cards.size} old cards"
+  cards.each do |c|
+    gh.call(:delete, path: "projects/columns/cards/#{c[:id]}")
+  end
 end
 wl_list.tasks.each do |task|
   puts "Creating card: #{task.title}"
